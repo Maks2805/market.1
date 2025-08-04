@@ -1,0 +1,356 @@
+1. Введение
+
+Market.1 - Интернет-магазин для покупок на все случаи жизни.
+
+Стек:
+Backend: Python + Flask
+База данных: SQLite (для упрощения разработки)
+Безопасность: Flask-Login + Flask-Bcrypt
+Формы: Flask-WTF
+ORM: Flask-SQLAlchemy
+
+
+2. Структура
+
+---app
+----static
+--------style.css
+----templates
+--------add_product.html
+--------base.html
+--------create_shop.html
+--------index.html
+--------login.html
+--------manage_shop.html
+--------product.html
+--------register.html
+--------search.html
+--------shop.html
+---__init__.py
+---forms.py
+---models.py
+---views.py
+config.py
+README.md
+requrements.txt
+run.py
+
+
+3. Модели даных
+
+# Импортируем db
+from . import db
+# Импортируем UserMixin
+from flask_login import UserMixin
+# Импортируем datetime
+from datetime import datetime
+# Импортируем bcrypt
+from . import bcrypt
+
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128), nullable=False)  # Храним хеш, а не пароль
+    
+    shops = db.relationship('Shop', backref='owner', lazy=True)
+    comments = db.relationship('Comment', backref='author', lazy=True)
+
+    # Метод для установки пароля (автоматически хеширует)
+    def set_password(self, password):
+        self.password_hash = bcrypt.generate_password_hash(password).decode('utf-8')
+    
+    # Метод для проверки пароля
+    def check_password(self, password):
+        return bcrypt.check_password_hash(self.password_hash, password)
+    
+    # Методы для Flask-Login
+    def get_id(self):
+        return str(self.id)
+    
+    @property
+    def is_active(self):
+        return True
+    
+    @property
+    def is_authenticated(self):
+        return True
+    
+    @property
+    def is_anonymous(self):
+        return False
+
+
+# Модель магазина
+class Shop(db.Model):
+    id = db.Column(db.Integer, primary_key=True)  # Уникальный идентификатор
+    name = db.Column(db.String(100), unique=True, nullable=False)  # Название магазина (уникальное)
+    
+    # Внешний ключ для связи с владельцем (пользователем)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    
+    # Связь: один магазин может содержать много товаров
+    products = db.relationship('Product', backref='shop', lazy=True)
+
+class Product(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text, nullable=False)
+    price = db.Column(db.Float, nullable=False)
+    image = db.Column(db.String(100))  # Добавляем поле для хранения имени файла изображения
+    shop_id = db.Column(db.Integer, db.ForeignKey('shop.id'), nullable=False)
+    comments = db.relationship('Comment', backref='product', lazy=True)
+
+    def __repr__(self):
+        return f"Product('{self.title}', '{self.price}')"
+
+# Модель комментария
+class Comment(db.Model):
+    id = db.Column(db.Integer, primary_key=True)  # Уникальный идентификатор
+    text = db.Column(db.Text, nullable=False)  # Текст комментария
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)  # Дата создания (автоматически)
+    
+    # Внешний ключ для связи с пользователем
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    # Внешний ключ для связи с товаром
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
+
+Пояснения:
+User.password_hash хранит хеш пароля (Flask-Bcrypt), а не сам пароль.
+CartItem — вспомогательная модель для связи пользователей и книг в корзине (many-to-many).
+
+
+4. Ключевые функции
+
+А. Регистрация пользователя
+Маршрут: /register (POST)
+Логика:
+Валидация формы (Flask-WTF)
+Хеширование пароля
+Сохранение в БД
+
+# Страница входа
+@views.route('/login', methods=['GET', 'POST'])
+def login():
+    # Если пользователь уже авторизован, перенаправляем на главную
+    if current_user.is_authenticated:
+        return redirect(url_for('views.index'))
+    
+    form = LoginForm()
+    if form.validate_on_submit():
+        user = User.query.filter_by(email=form.email.data).first()
+        
+        # Проверяем пароль с помощью bcrypt
+        if user and bcrypt.check_password_hash(user.password_hash, form.password.data):
+            login_user(user, remember=form.remember.data)
+            next_page = request.args.get('next')
+            return redirect(next_page) if next_page else redirect(url_for('views.index'))
+        else:
+            flash('Неверный email или пароль', 'danger')
+    return render_template('login.html', form=form)
+
+@views.route('/register', methods=['GET', 'POST'])
+def register():
+    if current_user.is_authenticated:
+        return redirect(url_for('views.index'))
+
+    form = RegisterForm()
+    
+    if form.validate_on_submit():
+        try:
+            # Проверяем, не занят ли email
+            existing_user = User.query.filter_by(email=form.email.data).first()
+            if existing_user:
+                flash('Этот email уже зарегистрирован!', 'danger')
+                return redirect(url_for('views.register'))
+
+            # Создаем нового пользователя
+            hashed_password = bcrypt.generate_password_hash(form.password.data).decode('utf-8')
+            new_user = User(
+                email=form.email.data,
+                password_hash=hashed_password
+            )
+            
+            db.session.add(new_user)
+            db.session.commit()
+            
+            flash('Регистрация прошла успешно! Теперь вы можете войти.', 'success')
+            return redirect(url_for('views.login'))
+            
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Ошибка при регистрации: {str(e)}', 'danger')
+            return redirect(url_for('views.register'))
+    
+    return render_template('register.html', form=form)
+
+
+Б. Добавление магазина, товара и поиск
+
+Маршрут: POST
+Логика:
+Проверка авторизации (Flask-Login)
+Создание связи CartItem
+
+# Создание магазина
+@views.route('/shop/create', methods=['GET', 'POST'])
+@login_required
+def create_shop():
+    form = ShopForm()
+    if form.validate_on_submit():
+        shop = Shop(
+            name=form.name.data,
+            owner=current_user
+        )
+        db.session.add(shop)
+        db.session.commit()
+        flash('Ваш магазин успешно создан!', 'success')
+        return redirect(url_for('views.manage_shop', shop_id=shop.id))
+    return render_template('create_shop.html', form=form)
+
+# Управление магазином
+@views.route('/shop/manage/<int:shop_id>')
+@login_required
+def manage_shop(shop_id):
+    shop = Shop.query.get_or_404(shop_id)
+    
+    # Проверяем, что текущий пользователь - владелец магазина
+    if shop.owner != current_user:
+        abort(403)
+    
+    return render_template('manage_shop.html', shop=shop)
+
+# Просмотр магазина
+@views.route('/shop/<int:shop_id>')
+def shop(shop_id):
+    shop = Shop.query.get_or_404(shop_id)
+    return render_template('shop.html', shop=shop)
+
+@views.route('/shop/<int:shop_id>/add', methods=['GET', 'POST'])
+@login_required
+def add_product(shop_id):
+    shop = Shop.query.get_or_404(shop_id)
+    
+    if shop.owner != current_user:
+        abort(403)
+    
+    form = ProductForm()
+    
+    if form.validate_on_submit():
+        try:
+            # Обработка загрузки изображения
+            image_filename = None
+            if form.image.data:
+                image = form.image.data
+                image_filename = secure_filename(image.filename)
+                image_path = os.path.join(current_app.root_path, 'static/uploads', image_filename)
+                image.save(image_path)
+            
+            # Создание товара
+            product = Product(
+                title=form.title.data,
+                description=form.description.data,
+                price=form.price.data,
+                image=image_filename,  # Сохраняем только имя файла
+                shop_id=shop.id
+            )
+            
+            db.session.add(product)
+            db.session.commit()
+            flash('Товар успешно добавлен!', 'success')
+            return redirect(url_for('views.manage_shop', shop_id=shop.id))
+            
+        except Exception as e:
+            db.session.rollback()
+            flash(f'Ошибка при добавлении товара: {str(e)}', 'danger')
+    
+    return render_template('add_product.html', form=form, shop=shop)
+
+# Страница товара
+@views.route('/product/<int:product_id>', methods=['GET', 'POST'])
+def product(product_id):
+    product = Product.query.get_or_404(product_id)
+    form = CommentForm()
+    
+    if form.validate_on_submit():
+        if not current_user.is_authenticated:
+            flash('Для добавления комментария необходимо войти в систему', 'warning')
+            return redirect(url_for('views.login'))
+        
+        comment = Comment(
+            text=form.text.data,
+            author=current_user,
+            product=product
+        )
+        db.session.add(comment)
+        db.session.commit()
+        flash('Ваш комментарий добавлен!', 'success')
+        return redirect(url_for('views.product', product_id=product.id))
+    
+    return render_template('product.html', product=product, form=form)
+
+# Удаление товара
+@views.route('/product/<int:product_id>/delete', methods=['POST'])
+@login_required
+def delete_product(product_id):
+    product = Product.query.get_or_404(product_id)
+    shop_id = product.shop.id
+    
+    # Проверка прав доступа
+    if product.shop.owner != current_user:
+        abort(403)
+    
+    # Удаляем изображение товара, если оно есть
+    if product.image:
+        try:
+            os.remove(os.path.join(UPLOAD_FOLDER, product.image))
+        except OSError:
+            pass
+    
+    # Удаляем все комментарии к товару
+    Comment.query.filter_by(product_id=product.id).delete()
+    
+    # Удаляем сам товар
+    db.session.delete(product)
+    db.session.commit()
+    flash('Товар успешно удален!', 'success')
+    return redirect(url_for('views.manage_shop', shop_id=shop_id))
+
+# Поиск товаров
+@views.route('/search')
+def search():
+    query = request.args.get('q', '')
+    
+    if query:
+        products = Product.query.filter(
+            Product.title.ilike(f'%{query}%') | 
+            Product.description.ilike(f'%{query}%')
+        ).all()
+    else:
+        products = []
+    
+    return render_template('search.html', products=products, query=query)
+
+
+5. Безопасность
+Сессии: Flask-Login управляет аутентификацией через куки.
+CSRF-защита: Включена глобально через Flask-WTF.
+Пароли: Хешируются Bcrypt (алгоритм bcrypt + соль).
+
+
+6. Запуск проекта
+
+Установите зависимости:
+pip install -r requirements.txt
+
+Инициализируйте БД:
+from app import db
+db.create_all()
+
+Запустите сервер:
+python ./run.py
+
+
+7. Ограничения
+Без реальной оплаты: Для диплома реализован "режим симуляции".
+Нет восстановления пароля: Требует интеграции с email-сервисом.
+Упрощенный интерфейс: Bootstrap 5 для базового UI.
